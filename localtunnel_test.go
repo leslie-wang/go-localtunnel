@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,8 +17,10 @@ type testLog struct {
 }
 
 func (t testLog) Println(v ...interface{}) {
-	t.Log(v...)
+	fmt.Println(v...)
 }
+
+var lastSubDomain string
 
 // testLocalTunnel against server at baseURL (if given)
 func testLocalTunnel(baseURL string, t *testing.T) {
@@ -42,10 +46,12 @@ func testLocalTunnel(baseURL string, t *testing.T) {
 	go server.ListenAndServe()
 	defer server.Close()
 
-	t.Log("setting up LocalTunnel")
+	log := testLog{t}
+	log.Println("setting up LocalTunnel")
 	lt, err := New(port, "", Options{
-		Log:            testLog{t},
-		MaxConnections: 2,
+		Subdomain:      lastSubDomain,
+		Log:            log,
+		MaxConnections: 1,
 		BaseURL:        baseURL,
 	})
 	if err != nil {
@@ -55,6 +61,19 @@ func testLocalTunnel(baseURL string, t *testing.T) {
 	// Sleep for 3s giving the server time to register
 	time.Sleep(3 * time.Second)
 
+	if lastSubDomain == "" {
+		u, err := url.Parse(lt.URL())
+		if err != nil {
+			t.Fatalf("failed to parse lt url: %s, err: %v", lt.URL(), err)
+		}
+		parts := strings.Split(strings.TrimSpace(u.Host), ".")
+		if len(parts) > 2 {
+			//The subdomain exists, we store it as the first element
+			//in a new array
+			lastSubDomain = strings.Join(parts[0:len(parts)-2], ".")
+		}
+	}
+
 	// Make http.Client with timeout of 30 seconds
 	client := &http.Client{
 		Timeout: 30 * time.Second,
@@ -62,7 +81,7 @@ func testLocalTunnel(baseURL string, t *testing.T) {
 
 	// Let's make 3 requests for good measure
 	for i := 0; i < 3; i++ {
-		t.Log("sending test request to:", lt.URL())
+		log.Println("sending test request to:", lt.URL())
 		var res *http.Response
 		res, err = client.Get(lt.URL())
 		if err != nil {
@@ -84,7 +103,7 @@ func testLocalTunnel(baseURL string, t *testing.T) {
 		}
 	}
 
-	t.Log("sending testing request to:", lt.URL()+"/?random=true")
+	log.Println("sending testing request to:", lt.URL()+"/?random=true")
 	var res *http.Response
 	res, err = client.Get(lt.URL() + "/?random=true")
 	if err != nil {
@@ -104,7 +123,7 @@ func testLocalTunnel(baseURL string, t *testing.T) {
 		t.Error("unexpected random response, size:", len(data))
 	}
 
-	t.Log("closing LocalTunnel")
+	log.Println("closing LocalTunnel")
 	err = lt.Close()
 	if err != nil {
 		t.Error("error closing the tunnel: ", err)
@@ -112,5 +131,11 @@ func testLocalTunnel(baseURL string, t *testing.T) {
 }
 
 func TestLocalTunnel(t *testing.T) {
-	testLocalTunnel("", t)
+	for i := 0; i < 10; i++ {
+		//testLocalTunnel("http://localhost:1234", t)
+		testLocalTunnel("", t)
+
+		// sleep 10 seconds and retest with last allocated sub-domain
+		time.Sleep(10 * time.Second)
+	}
 }

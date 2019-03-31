@@ -67,7 +67,7 @@ func Listen(options Options) (*Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse server response, error: %s", err)
 	}
-	l.log.Println("registered tunnel:", reply.URL)
+	l.log.Println("registered tunnel: ", reply)
 
 	// Set some sanity values
 	if reply.MaxConnCount == 0 {
@@ -85,14 +85,41 @@ func Listen(options Options) (*Listener, error) {
 	l.url = reply.URL
 
 	// Start listening for new connections
+	errChan := make(chan error, reply.MaxConnCount)
 	l.incoming = make(chan net.Conn, reply.MaxConnCount)
 	l.done.Add(reply.MaxConnCount)
 	for i := 0; i < reply.MaxConnCount; i++ {
-		go l.proxy()
+		go func() {
+			c, err := l.connect()
+			errChan <- err
+			if err == nil {
+				if err := l.handle(c); err != nil {
+					l.abort(err)
+				}
+				l.done.Done()
+			}
+		}()
 	}
-	l.nConns.WaitFor(1)
 
-	return l, nil
+	ret := make(chan error)
+	go func() {
+		notify := false
+		for i := 0; i < reply.MaxConnCount; i++ {
+			if err := <-errChan; err != nil {
+				l.log.Println("while waiting for proxy, receive error: ", err)
+				continue
+			}
+			if !notify {
+				ret <- nil
+				notify = true
+			}
+		}
+		if !notify {
+			ret <- fmt.Errorf("fail for %d connections", reply.MaxConnCount)
+		}
+	}()
+
+	return l, <-ret
 }
 
 // Accept returns the next incoming connection
@@ -108,32 +135,27 @@ func (l *Listener) Accept() (net.Conn, error) {
 	}
 }
 
-func (l *Listener) proxy() {
+func (l *Listener) connect() (c net.Conn , err error) {
+	// Dial with Context
 	var d net.Dialer
-	for l.context.Err() == nil {
-		// Dial with Context
-		var c net.Conn
-		var err error
-		for i := 0; i < 3; i++ {
-			time.Sleep(time.Duration(i*i) * 3 * time.Second)
-			c, err = d.DialContext(l.context, "tcp", l.remote)
-			if err == nil || l.context.Err() != nil {
-				break
-			}
-			l.log.Println("error opening connection to ", l.remote, "error:", err)
-		}
-		if err != nil {
-			l.abort(err)
+	for i := 0; i < 3; i++ {
+		time.Sleep(time.Duration(i*i) * 3 * time.Second)
+		c, err = d.DialContext(l.context, "tcp", l.remote)
+		if err == nil {
+			l.log.Println("success open connection to ", l.remote)
 			break
 		}
-		l.nConns.Add(1)
-
-		err = l.handle(c)
-		if err != nil {
-			l.abort(err)
+		if l.context.Err() != nil {
+			return nil, l.context.Err()
 		}
+		l.log.Println(i+1, " attempt connection got: ", err)
 	}
-	l.done.Done()
+	if err != nil {
+		return nil, err
+	}
+	l.nConns.Add(1)
+
+	return c, nil
 }
 
 func (l *Listener) handle(c net.Conn) error {
@@ -161,6 +183,7 @@ func (l *Listener) handle(c net.Conn) error {
 	if err != nil {
 		// Ignore if it took more than 30s
 		if start.Before(time.Now().Add(-30 * time.Second)) {
+			l.nConns.Add(-1)
 			c.Close()
 			return nil
 		}
@@ -171,6 +194,7 @@ func (l *Listener) handle(c net.Conn) error {
 	done := make(chan struct{})
 	l.incoming <- &conn{Conn: c, Buffer: b, Done: done}
 
+	fmt.Println("waitint for proxy connection is done")
 	// Wait for conn to be closed
 	select {
 	case <-done:

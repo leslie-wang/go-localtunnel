@@ -56,6 +56,7 @@ func (lt *LocalTunnel) forward(remoteConn net.Conn) {
 		return
 	}
 
+	fmt.Println("start forwarding")
 	go func() {
 		io.Copy(remoteConn, localConn)
 		remoteConn.Close()
